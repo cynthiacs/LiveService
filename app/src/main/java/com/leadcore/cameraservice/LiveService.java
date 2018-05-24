@@ -15,10 +15,10 @@ import java.security.MessageDigest;
 
 public class LiveService extends Service implements Runnable{
 
-    private LiveListener mListener;
+    private volatile LiveListener mListener;
     private LSBinder mBinder = new LSBinder();
     private long mPushId = 0;
-    private StreamingHandler mStreamingHandler;
+    private volatile StreamingHandler mStreamingHandler;
     private volatile Looper mServiceLooper;
     private volatile ServiceHandler mHandler;
     private final static int LIVE_DEVICE_ERROR = -1;
@@ -66,10 +66,12 @@ public class LiveService extends Service implements Runnable{
 
     @Override
     public void run() {
+        Log.d(TAG, "run begin");
         Looper.prepare();
         mServiceLooper = Looper.myLooper();
         mHandler = new ServiceHandler();
         Looper.loop();
+        Log.d(TAG, "run end");
     }
 
     private void waitServiceHanler() {
@@ -95,6 +97,7 @@ public class LiveService extends Service implements Runnable{
     private final class ServiceHandler extends Handler {
         @Override
         public void handleMessage(Message msg) {
+            Log.d(TAG, "handleMessage");
             MessageObject obj = (MessageObject) msg.obj;
             int result;
             switch (msg.what) {
@@ -117,6 +120,7 @@ public class LiveService extends Service implements Runnable{
                 case MSG_STOP_PUSH:
                     Log.d(TAG, "receive MSG_STOP_PUSH");
                     mStreamingHandler.stop(mPushId, obj.channelId);
+                    Log.d(TAG, "receive MSG_STOP_PUSH end");
                     break;
             }
         }
@@ -146,12 +150,15 @@ public class LiveService extends Service implements Runnable{
     public void setparameter(int channelId, int type, int value) {
         Log.d(TAG, "setparameter");
         waitServiceHanler();
+        Log.d(TAG, "setparameter:mPushId = "+mPushId+", mHandler = "+mHandler);
         MessageObject object = new MessageObject();
         object.channelId = channelId;
         object.paraType = type;
         object.value = value;
         int result = StreamingHandler.publish_device_error;
+
         if(mPushId > 0) {
+            Log.d(TAG, "setparameter: send msg");
             mHandler.sendMessage(mHandler.obtainMessage(MSG_SET_PARAM, object));
         }else {
             Log.d(TAG, "setparameter:mPushId <= 0 ");
