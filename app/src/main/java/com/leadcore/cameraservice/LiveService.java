@@ -11,8 +11,6 @@ import android.os.Looper;
 import android.os.Message;
 import android.util.Log;
 
-import java.security.MessageDigest;
-
 public class LiveService extends Service implements Runnable{
 
     private volatile LiveListener mListener;
