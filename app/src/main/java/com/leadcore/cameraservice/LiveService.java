@@ -12,13 +12,11 @@ import android.content.IntentFilter;
 import android.database.ContentObserver;
 import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
-import android.net.wifi.WifiManager;
 import android.os.Binder;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.Message;
-import android.os.Parcelable;
 import android.provider.Settings;
 import android.util.Log;
 
@@ -27,7 +25,6 @@ import com.cmteam.cloudmedia.CloudMedia;
 
 
 public class LiveService extends Service implements Runnable {
-
     private volatile LiveListener mListener = null;
     private LSBinder mBinder = new LSBinder();
     private long mPushId = 0;
@@ -38,6 +35,8 @@ public class LiveService extends Service implements Runnable {
     private final static int LIVE_CONNECT_ERROR = -2;
     private final static String TAG = "LiveService";
     private static final String STREAMING_ERROR_ACTION = "org.camera.pusher.action.error";
+    private static final String START_LIVE_ACTION = "com.leadcore.edr.action.startliveshow";
+    private static final String STOP_LIVE_ACTION = "com.leadcore.edr.action.stopliveshow";
     private static final String SYSTEM_SETTINGS_CAMERA_STATUS = "camera_status";
     private static final String SYSTEM_SETTINGS_PLATE = "plate";
     private final static String mDomainName = "www.yangxudong.com";
@@ -70,6 +69,7 @@ public class LiveService extends Service implements Runnable {
     private String mNodeIDSet[] = new String[CAMERA_NUM_MAX];
     private int nCameraStatus;
     private boolean bNetConnected = false;
+    private boolean nUVCTEST = false;
 
     @Override
     public void onCreate() {
@@ -180,6 +180,7 @@ public class LiveService extends Service implements Runnable {
                     Log.d(TAG, "receive MSG_STOP_PUSH end");
                     break;
                 case MSG_LOGIN_START:
+                    Log.d(TAG, "receive MSG_LOGIN_START");
                     if (mCloudMedia == null) {
                         mCloudMedia = CloudMedia.get();
                         if (mCloudMedia == null) {
@@ -201,16 +202,22 @@ public class LiveService extends Service implements Runnable {
                     if ((nCameraStatus & 0x8) == 0) {
                         loginAndNodeConnect(CAMERA_NUM_3);
                     }
+
+                    if (nUVCTEST) {
+                        loginAndNodeConnect(CAMERA_NUM_4);
+                        loginAndNodeConnect(CAMERA_NUM_5);
+                    }
                     break;
 
                 case MSG_CAMERA_STATUS_CHANGE:
+                    Log.d(TAG, "receive MSG_CAMERA_STATUS_CHANGE");
                     int mCameraStatus_Old = obj.paraType;
                     int mCameraStatus_New = obj.value;
 
                     Log.d(TAG, "mCameraStatus_Old: " + mCameraStatus_Old +
                             ", mCameraStatus_New: " + mCameraStatus_New +
                             ", bNetConnected: " + bNetConnected);
-                    if (!bNetConnected) {
+                    if (!bNetConnected || mCloudMedia == null) {
                         return;
                     }
                     if ((mCameraStatus_New & 0x1) != ((mCameraStatus_Old & 0x1))) {
@@ -370,34 +377,33 @@ public class LiveService extends Service implements Runnable {
     }
 
     private void logout() {
-        mHandler.sendEmptyMessage(MSG_LOGOUT_START);
+        if (bNetConnected) {
+            mHandler.sendEmptyMessage(MSG_LOGOUT_START);
+        }
+    }
+
+    private void sendBroadcastStartPush(int channelId, String url, int lasttime, int quality) {
+        Intent intent = new Intent(START_LIVE_ACTION);
+        intent.putExtra("channelId", String.valueOf(channelId));
+        intent.putExtra("quality", String.valueOf(quality));
+        intent.putExtra("lastTime", String.valueOf(lasttime));
+        intent.putExtra("suggestion_addr", url);
+        intent.putExtra("suggestion_addrLen", String.valueOf(url.length()));
+        getApplicationContext().sendBroadcast(intent);
+    }
+
+    private void sendBroadcastStopPush(int channelId) {
+        Intent intent = new Intent(STOP_LIVE_ACTION);
+        intent.putExtra("channelId", String.valueOf(channelId));
+        getApplicationContext().sendBroadcast(intent);
     }
 
     private void startPush(int channelId, String url) {
-        init();
-        Log.d(TAG, "startLive:mPushId = " + mPushId);
-        waitServiceHanler();
-        int result = StreamingHandler.publish_device_error;
-        MessageObject object = new MessageObject();
-        object.channelId = channelId;
-        object.url = url;
-
-        if (mPushId > 0) {
-            mHandler.sendMessage(mHandler.obtainMessage(MSG_START_PUSH, object));
-        } else {
-            result = LIVE_DEVICE_ERROR;
-            Log.d(TAG, "startPush: " + result);
-        }
+        sendBroadcastStartPush(channelId, url, 1800, 0);
     }
 
     public void stoppush(int channelId) {
-        Log.d(TAG, "stop channelID " + channelId + ",mPushId = " + mPushId);
-        waitServiceHanler();
-        MessageObject object = new MessageObject();
-        object.channelId = channelId;
-        if (mPushId > 0) {
-            mHandler.sendMessage(mHandler.obtainMessage(MSG_STOP_PUSH, object));
-        }
+        sendBroadcastStopPush(channelId);
     }
 
     private void connectCloudMedia(String devicename, String nodeID) {
@@ -407,7 +413,8 @@ public class LiveService extends Service implements Runnable {
         final int mChannelID = CAMERA_NUM_0;
 
         if (mPushNode[mChannelID] == null) {
-            mPushNode[mChannelID] = mCloudMedia.declarePushNode(getApplicationContext(), mNodeNick, mDeviceName);
+            mPushNode[mChannelID] = mCloudMedia.declarePushNode(getApplicationContext(),
+                    mNodeNick, mDeviceName);
         }
         mPushNode[mChannelID].setOnStartPushMediaActor(new PushNode.OnStartPushMedia() {
             @Override
@@ -423,17 +430,18 @@ public class LiveService extends Service implements Runnable {
                 }
 
                 startPush(mChannelID, mRtmpUrl[mChannelID]);
-                mPushNode[mChannelID].updateStreamStatus(CloudMedia.CMStreamStatus.PUSHING, new CloudMedia.RPCResultListener() {
-                    @Override
-                    public void onSuccess(String s) {
-                        Log.d(TAG, "updateStreamStatus onSuccess");
-                    }
+                mPushNode[mChannelID].updateStreamStatus(CloudMedia.CMStreamStatus.PUSHING,
+                        new CloudMedia.RPCResultListener() {
+                            @Override
+                            public void onSuccess(String s) {
+                                Log.d(TAG, "updateStreamStatus onSuccess");
+                            }
 
-                    @Override
-                    public void onFailure(String s) {
-                        Log.d(TAG, "updateStreamStatus onFailure");
-                    }
-                });
+                            @Override
+                            public void onFailure(String s) {
+                                Log.d(TAG, "updateStreamStatus onFailure");
+                            }
+                        });
                 return true;
             }
         });
@@ -447,17 +455,18 @@ public class LiveService extends Service implements Runnable {
                 return true;
             }
         });
-        mPushNode[mChannelID].connect(mCloudMedia.getUser(mNodeID), new CloudMedia.RPCResultListener() {
-            @Override
-            public void onSuccess(String s) {
-                Log.d(TAG, "connect onSuccess");
-            }
+        mPushNode[mChannelID].connect(mCloudMedia.getUser(mNodeID),
+                new CloudMedia.RPCResultListener() {
+                    @Override
+                    public void onSuccess(String s) {
+                        Log.d(TAG, "connect onSuccess");
+                    }
 
-            @Override
-            public void onFailure(String s) {
-                Log.d(TAG, "connect onFailure");
-            }
-        });
+                    @Override
+                    public void onFailure(String s) {
+                        Log.d(TAG, "connect onFailure");
+                    }
+                });
     }
 
     private void connectCloudMedia_One(String devicename, String nodeID) {
@@ -467,7 +476,8 @@ public class LiveService extends Service implements Runnable {
         final int mChannelID = CAMERA_NUM_1;
 
         if (mPushNode[mChannelID] == null) {
-            mPushNode[mChannelID] = mCloudMedia.declarePushNode(getApplicationContext(), mNodeNick, mDeviceName);
+            mPushNode[mChannelID] = mCloudMedia.declarePushNode(getApplicationContext(),
+                    mNodeNick, mDeviceName);
         }
         mPushNode[mChannelID].setOnStartPushMediaActor(new PushNode.OnStartPushMedia() {
             @Override
@@ -483,17 +493,18 @@ public class LiveService extends Service implements Runnable {
                 }
 
                 startPush(mChannelID, mRtmpUrl[mChannelID]);
-                mPushNode[mChannelID].updateStreamStatus(CloudMedia.CMStreamStatus.PUSHING, new CloudMedia.RPCResultListener() {
-                    @Override
-                    public void onSuccess(String s) {
-                        Log.d(TAG, "updateStreamStatus onSuccess");
-                    }
+                mPushNode[mChannelID].updateStreamStatus(CloudMedia.CMStreamStatus.PUSHING,
+                        new CloudMedia.RPCResultListener() {
+                            @Override
+                            public void onSuccess(String s) {
+                                Log.d(TAG, "updateStreamStatus onSuccess");
+                            }
 
-                    @Override
-                    public void onFailure(String s) {
-                        Log.d(TAG, "updateStreamStatus onFailure");
-                    }
-                });
+                            @Override
+                            public void onFailure(String s) {
+                                Log.d(TAG, "updateStreamStatus onFailure");
+                            }
+                        });
                 return true;
             }
         });
@@ -507,17 +518,18 @@ public class LiveService extends Service implements Runnable {
                 return true;
             }
         });
-        mPushNode[mChannelID].connect(mCloudMedia.getUser(mNodeID), new CloudMedia.RPCResultListener() {
-            @Override
-            public void onSuccess(String s) {
-                Log.d(TAG, "connect onSuccess");
-            }
+        mPushNode[mChannelID].connect(mCloudMedia.getUser(mNodeID),
+                new CloudMedia.RPCResultListener() {
+                    @Override
+                    public void onSuccess(String s) {
+                        Log.d(TAG, "connect onSuccess");
+                    }
 
-            @Override
-            public void onFailure(String s) {
-                Log.d(TAG, "connect onFailure");
-            }
-        });
+                    @Override
+                    public void onFailure(String s) {
+                        Log.d(TAG, "connect onFailure");
+                    }
+                });
     }
 
     private void connectCloudMedia_Two(String devicename, String nodeID) {
@@ -527,7 +539,8 @@ public class LiveService extends Service implements Runnable {
         final int mChannelID = CAMERA_NUM_2;
 
         if (mPushNode[mChannelID] == null) {
-            mPushNode[mChannelID] = mCloudMedia.declarePushNode(getApplicationContext(), mNodeNick, mDeviceName);
+            mPushNode[mChannelID] = mCloudMedia.declarePushNode(getApplicationContext(),
+                    mNodeNick, mDeviceName);
         }
         mPushNode[mChannelID].setOnStartPushMediaActor(new PushNode.OnStartPushMedia() {
             @Override
@@ -543,17 +556,18 @@ public class LiveService extends Service implements Runnable {
                 }
 
                 startPush(mChannelID, mRtmpUrl[mChannelID]);
-                mPushNode[mChannelID].updateStreamStatus(CloudMedia.CMStreamStatus.PUSHING, new CloudMedia.RPCResultListener() {
-                    @Override
-                    public void onSuccess(String s) {
-                        Log.d(TAG, "updateStreamStatus onSuccess");
-                    }
+                mPushNode[mChannelID].updateStreamStatus(CloudMedia.CMStreamStatus.PUSHING,
+                        new CloudMedia.RPCResultListener() {
+                            @Override
+                            public void onSuccess(String s) {
+                                Log.d(TAG, "updateStreamStatus onSuccess");
+                            }
 
-                    @Override
-                    public void onFailure(String s) {
-                        Log.d(TAG, "updateStreamStatus onFailure");
-                    }
-                });
+                            @Override
+                            public void onFailure(String s) {
+                                Log.d(TAG, "updateStreamStatus onFailure");
+                            }
+                        });
                 return true;
             }
         });
@@ -567,17 +581,18 @@ public class LiveService extends Service implements Runnable {
                 return true;
             }
         });
-        mPushNode[mChannelID].connect(mCloudMedia.getUser(mNodeID), new CloudMedia.RPCResultListener() {
-            @Override
-            public void onSuccess(String s) {
-                Log.d(TAG, "connect onSuccess");
-            }
+        mPushNode[mChannelID].connect(mCloudMedia.getUser(mNodeID),
+                new CloudMedia.RPCResultListener() {
+                    @Override
+                    public void onSuccess(String s) {
+                        Log.d(TAG, "connect onSuccess");
+                    }
 
-            @Override
-            public void onFailure(String s) {
-                Log.d(TAG, "connect onFailure");
-            }
-        });
+                    @Override
+                    public void onFailure(String s) {
+                        Log.d(TAG, "connect onFailure");
+                    }
+                });
     }
 
     private void connectCloudMedia_Three(String devicename, String nodeID) {
@@ -587,7 +602,8 @@ public class LiveService extends Service implements Runnable {
         final int mChannelID = CAMERA_NUM_3;
 
         if (mPushNode[mChannelID] == null) {
-            mPushNode[mChannelID] = mCloudMedia.declarePushNode(getApplicationContext(), mNodeNick, mDeviceName);
+            mPushNode[mChannelID] = mCloudMedia.declarePushNode(getApplicationContext(),
+                    mNodeNick, mDeviceName);
         }
         mPushNode[mChannelID].setOnStartPushMediaActor(new PushNode.OnStartPushMedia() {
             @Override
@@ -603,17 +619,18 @@ public class LiveService extends Service implements Runnable {
                 }
 
                 startPush(mChannelID, mRtmpUrl[mChannelID]);
-                mPushNode[mChannelID].updateStreamStatus(CloudMedia.CMStreamStatus.PUSHING, new CloudMedia.RPCResultListener() {
-                    @Override
-                    public void onSuccess(String s) {
-                        Log.d(TAG, "updateStreamStatus onSuccess");
-                    }
+                mPushNode[mChannelID].updateStreamStatus(CloudMedia.CMStreamStatus.PUSHING,
+                        new CloudMedia.RPCResultListener() {
+                            @Override
+                            public void onSuccess(String s) {
+                                Log.d(TAG, "updateStreamStatus onSuccess");
+                            }
 
-                    @Override
-                    public void onFailure(String s) {
-                        Log.d(TAG, "updateStreamStatus onFailure");
-                    }
-                });
+                            @Override
+                            public void onFailure(String s) {
+                                Log.d(TAG, "updateStreamStatus onFailure");
+                            }
+                        });
                 return true;
             }
         });
@@ -627,17 +644,18 @@ public class LiveService extends Service implements Runnable {
                 return true;
             }
         });
-        mPushNode[mChannelID].connect(mCloudMedia.getUser(mNodeID), new CloudMedia.RPCResultListener() {
-            @Override
-            public void onSuccess(String s) {
-                Log.d(TAG, "connect onSuccess");
-            }
+        mPushNode[mChannelID].connect(mCloudMedia.getUser(mNodeID),
+                new CloudMedia.RPCResultListener() {
+                    @Override
+                    public void onSuccess(String s) {
+                        Log.d(TAG, "connect onSuccess");
+                    }
 
-            @Override
-            public void onFailure(String s) {
-                Log.d(TAG, "connect onFailure");
-            }
-        });
+                    @Override
+                    public void onFailure(String s) {
+                        Log.d(TAG, "connect onFailure");
+                    }
+                });
     }
 
     private void connectCloudMedia_Four(String devicename, String nodeID) {
@@ -647,7 +665,8 @@ public class LiveService extends Service implements Runnable {
         final int mChannelID = CAMERA_NUM_4;
 
         if (mPushNode[mChannelID] == null) {
-            mPushNode[mChannelID] = mCloudMedia.declarePushNode(getApplicationContext(), mNodeNick, mDeviceName);
+            mPushNode[mChannelID] = mCloudMedia.declarePushNode(getApplicationContext(),
+                    mNodeNick, mDeviceName);
         }
         mPushNode[mChannelID].setOnStartPushMediaActor(new PushNode.OnStartPushMedia() {
             @Override
@@ -663,17 +682,18 @@ public class LiveService extends Service implements Runnable {
                 }
 
                 startPush(mChannelID, mRtmpUrl[mChannelID]);
-                mPushNode[mChannelID].updateStreamStatus(CloudMedia.CMStreamStatus.PUSHING, new CloudMedia.RPCResultListener() {
-                    @Override
-                    public void onSuccess(String s) {
-                        Log.d(TAG, "updateStreamStatus onSuccess");
-                    }
+                mPushNode[mChannelID].updateStreamStatus(CloudMedia.CMStreamStatus.PUSHING,
+                        new CloudMedia.RPCResultListener() {
+                            @Override
+                            public void onSuccess(String s) {
+                                Log.d(TAG, "updateStreamStatus onSuccess");
+                            }
 
-                    @Override
-                    public void onFailure(String s) {
-                        Log.d(TAG, "updateStreamStatus onFailure");
-                    }
-                });
+                            @Override
+                            public void onFailure(String s) {
+                                Log.d(TAG, "updateStreamStatus onFailure");
+                            }
+                        });
                 return true;
             }
         });
@@ -687,17 +707,18 @@ public class LiveService extends Service implements Runnable {
                 return true;
             }
         });
-        mPushNode[mChannelID].connect(mCloudMedia.getUser(mNodeID), new CloudMedia.RPCResultListener() {
-            @Override
-            public void onSuccess(String s) {
-                Log.d(TAG, "connect onSuccess");
-            }
+        mPushNode[mChannelID].connect(mCloudMedia.getUser(mNodeID),
+                new CloudMedia.RPCResultListener() {
+                    @Override
+                    public void onSuccess(String s) {
+                        Log.d(TAG, "connect onSuccess");
+                    }
 
-            @Override
-            public void onFailure(String s) {
-                Log.d(TAG, "connect onFailure");
-            }
-        });
+                    @Override
+                    public void onFailure(String s) {
+                        Log.d(TAG, "connect onFailure");
+                    }
+                });
     }
 
     private void connectCloudMedia_Five(String devicename, String nodeID) {
@@ -707,7 +728,8 @@ public class LiveService extends Service implements Runnable {
         final int mChannelID = CAMERA_NUM_5;
 
         if (mPushNode[mChannelID] == null) {
-            mPushNode[mChannelID] = mCloudMedia.declarePushNode(getApplicationContext(), mNodeNick, mDeviceName);
+            mPushNode[mChannelID] = mCloudMedia.declarePushNode(getApplicationContext(),
+                    mNodeNick, mDeviceName);
         }
         mPushNode[mChannelID].setOnStartPushMediaActor(new PushNode.OnStartPushMedia() {
             @Override
@@ -723,17 +745,18 @@ public class LiveService extends Service implements Runnable {
                 }
 
                 startPush(mChannelID, mRtmpUrl[mChannelID]);
-                mPushNode[mChannelID].updateStreamStatus(CloudMedia.CMStreamStatus.PUSHING, new CloudMedia.RPCResultListener() {
-                    @Override
-                    public void onSuccess(String s) {
-                        Log.d(TAG, "updateStreamStatus onSuccess");
-                    }
+                mPushNode[mChannelID].updateStreamStatus(CloudMedia.CMStreamStatus.PUSHING,
+                        new CloudMedia.RPCResultListener() {
+                            @Override
+                            public void onSuccess(String s) {
+                                Log.d(TAG, "updateStreamStatus onSuccess");
+                            }
 
-                    @Override
-                    public void onFailure(String s) {
-                        Log.d(TAG, "updateStreamStatus onFailure");
-                    }
-                });
+                            @Override
+                            public void onFailure(String s) {
+                                Log.d(TAG, "updateStreamStatus onFailure");
+                            }
+                        });
                 return true;
             }
         });
@@ -867,7 +890,8 @@ public class LiveService extends Service implements Runnable {
 
     private void getCameraStatus() {
         try {
-            nCameraStatus = Settings.System.getInt(getContentResolver(), SYSTEM_SETTINGS_CAMERA_STATUS);
+            nCameraStatus = Settings.System.getInt(getContentResolver(),
+                    SYSTEM_SETTINGS_CAMERA_STATUS);
             Log.d(TAG, "getCameraStatus nCameraStatus: " + nCameraStatus);
         } catch (Settings.SettingNotFoundException e) {
             e.printStackTrace();
@@ -879,10 +903,12 @@ public class LiveService extends Service implements Runnable {
             try {
                 MessageObject object = new MessageObject();
                 int nCameraStatus_Old = nCameraStatus;
-                nCameraStatus = Settings.System.getInt(getContentResolver(), SYSTEM_SETTINGS_CAMERA_STATUS);
+                nCameraStatus = Settings.System.getInt(getContentResolver(),
+                        SYSTEM_SETTINGS_CAMERA_STATUS);
                 object.paraType = nCameraStatus_Old;
                 object.value = nCameraStatus;
-                Log.d(TAG, "nCameraStatus_Old: " + nCameraStatus_Old + ", nCameraStatus: " + nCameraStatus);
+                Log.d(TAG, "nCameraStatus_Old: " + nCameraStatus_Old
+                        + ", nCameraStatus: " + nCameraStatus);
                 mHandler.sendMessage(mHandler.obtainMessage(MSG_CAMERA_STATUS_CHANGE, object));
             } catch (Settings.SettingNotFoundException e) {
                 e.printStackTrace();
@@ -893,78 +919,17 @@ public class LiveService extends Service implements Runnable {
     private BroadcastReceiver mNetworkConnectChangedReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
-            if ("org.camera.pusher.action.error".equals(intent.getAction())) {
-                int errorChannelID = intent.getIntExtra("channelID", 0);
-                int errortype = intent.getIntExtra("error_type", -2);
-                Log.d(TAG, "errorChannelID: " + errorChannelID + ", errortype: " + errortype);
-                if (errorChannelID == -1) {
-
-                } else {
-                    stoppush(errorChannelID);
-                }
-            }
-
-            if (WifiManager.WIFI_STATE_CHANGED_ACTION.equals(intent.getAction())) {
-                int wifiState = intent.getIntExtra(WifiManager.EXTRA_WIFI_STATE, 0);
-                Log.d(TAG, "wifiState: " + wifiState);
-                switch (wifiState) {
-                    case WifiManager.WIFI_STATE_DISABLED:
-                        break;
-                    case WifiManager.WIFI_STATE_DISABLING:
-                        break;
-                    case WifiManager.WIFI_STATE_ENABLING:
-                        break;
-                    case WifiManager.WIFI_STATE_ENABLED:
-                        break;
-                    case WifiManager.WIFI_STATE_UNKNOWN:
-                        break;
-                    default:
-                        break;
-                }
-            }
-
-            if (WifiManager.NETWORK_STATE_CHANGED_ACTION.equals(intent.getAction())) {
-                Parcelable parcelableExtra = intent
-                        .getParcelableExtra(WifiManager.EXTRA_NETWORK_INFO);
-                if (null != parcelableExtra) {
-                    NetworkInfo networkInfo = (NetworkInfo) parcelableExtra;
-                    NetworkInfo.State state = networkInfo.getState();
-                    boolean isConnected = state == NetworkInfo.State.CONNECTED;// 当然，这边可以更精确的确定状态
-                    Log.e(TAG, "isConnected: " + isConnected);
-                    if (isConnected) {
-                    } else {
-                    }
-                }
-            }
-
             if (ConnectivityManager.CONNECTIVITY_ACTION.equals(intent.getAction())) {
                 ConnectivityManager manager = (ConnectivityManager) context
                         .getSystemService(Context.CONNECTIVITY_SERVICE);
-                Log.i(TAG, "CONNECTIVITY_ACTION");
-
-                NetworkInfo activeNetwork = manager.getActiveNetworkInfo();
-                if (activeNetwork != null) { // connected to the internet
-                    if (activeNetwork.isConnected()) {
-                        if (activeNetwork.getType() == ConnectivityManager.TYPE_WIFI) {
-                            // connected to wifi
-                            Log.e(TAG, "当前WiFi连接可用 ");
-                            bNetConnected = true;
-                            login();
-                        } else if (activeNetwork.getType() == ConnectivityManager.TYPE_MOBILE) {
-                            // connected to the mobile provider's data plan
-                            Log.e(TAG, "当前移动网络连接可用 ");
-                            bNetConnected = true;
-                            login();
-                        }
-                    } else {
-                        Log.e(TAG, "当前没有网络连接，请确保你已经打开网络 ");
-                        bNetConnected = false;
-                        getApplicationContext().sendBroadcast(new Intent("finish"));
-                    }
-                } else {   // not connected to the internet
+                NetworkInfo networkInfo = manager.getActiveNetworkInfo();
+                if (networkInfo != null && networkInfo.isConnected()) { // connected to the internet
+                    Log.d(TAG, "NetWork Type: " + networkInfo.getType()
+                            + "， Subtype Name:" + networkInfo.getSubtypeName());
+                    bNetConnected = true;
+                    login();
+                } else {
                     bNetConnected = false;
-                    getApplicationContext().sendBroadcast(new Intent("finish"));
-                    Log.e(TAG, "当前没有网络连接，请确保你已经打开网络 ");
                 }
             }
         }
